@@ -1,0 +1,6 @@
+{
+  "name": "ria MANAGER",
+  "description": "Multi-tab cloud and local file manager supporting Google Drive, OneDrive, S3, FTP, and secure synchronization and encryption.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
