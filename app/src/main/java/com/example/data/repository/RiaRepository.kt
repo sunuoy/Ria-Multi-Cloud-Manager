@@ -168,6 +168,20 @@ class RiaRepository(
         return accMap[path] ?: emptyList()
     }
 
+    // Search files globally across all accounts and paths
+    fun searchFiles(query: String): List<Pair<Int, VFile>> {
+        if (query.isBlank()) return emptyList()
+        val results = mutableListOf<Pair<Int, VFile>>()
+        virtualStorage.value.forEach { (accountId, pathMap) ->
+            pathMap.values.flatten().distinctBy { it.path }.forEach { file ->
+                if (file.name.contains(query, ignoreCase = true) || file.path.contains(query, ignoreCase = true)) {
+                    results.add(accountId to file)
+                }
+            }
+        }
+        return results
+    }
+
     // Tab CRUD
     fun addNewTab(accountId: Int, title: String) {
         val current = _tabs.value.toMutableList()

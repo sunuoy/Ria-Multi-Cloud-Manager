@@ -41,6 +41,10 @@ fun ExplorerScreen(viewModel: RiaViewModel) {
     val currentTab by viewModel.currentTab.collectAsState()
     val clipboard by viewModel.clipboard.collectAsState()
 
+    // Global Search State Flows from ViewModel
+    val globalSearchQuery by viewModel.searchQuery.collectAsState()
+    val globalSearchResults by viewModel.searchResults.collectAsState()
+
     // Dialog state controllers
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
@@ -50,6 +54,34 @@ fun ExplorerScreen(viewModel: RiaViewModel) {
 
     // Search filter state
     var searchQuery by remember { mutableStateOf("") }
+    var isGlobalSearchEnabled by remember { mutableStateOf(false) }
+
+    // Android File System API state variables
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var isRealLocalFSEnabled by remember { mutableStateOf(false) }
+    var realLocalPath by remember { mutableStateOf(context.filesDir.absolutePath) }
+
+    // Multi-Selection State
+    var isMultiSelectActive by remember { mutableStateOf(false) }
+    var selectedFiles by remember { mutableStateOf(setOf<VFile>()) }
+
+    // Helper to refresh files when doing file system operations
+    var fsChangeCounter by remember { mutableStateOf(0) }
+
+    val filesToDisplay = remember(currentFiles, isRealLocalFSEnabled, realLocalPath, searchQuery, isGlobalSearchEnabled, globalSearchResults, fsChangeCounter) {
+        if (isGlobalSearchEnabled) {
+            emptyList() // Rendered separately by group
+        } else if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+            // Read from actual filesDir using Android File System APIs
+            getRealLocalFilesList(realLocalPath, context).filter {
+                it.name.contains(searchQuery, ignoreCase = true)
+            }
+        } else {
+            currentFiles.filter {
+                it.name.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -61,7 +93,11 @@ fun ExplorerScreen(viewModel: RiaViewModel) {
             TabCarouselSection(
                 tabs = tabs,
                 selectedTabId = selectedTabId,
-                onTabSelected = { viewModel.selectTab(it) },
+                onTabSelected = { 
+                    viewModel.selectTab(it)
+                    isMultiSelectActive = false
+                    selectedFiles = emptySet()
+                },
                 onTabClosed = { viewModel.closeTab(it) },
                 onAddTabClicked = { showAddTabDialog = true }
             )
@@ -70,54 +106,398 @@ fun ExplorerScreen(viewModel: RiaViewModel) {
 
             if (currentTab != null) {
                 // 2. PATH BREADCRUMBS & NAVIGATION TOOLS
-                ExplorerNavigationHeader(
-                    currentTab = currentTab!!,
-                    onBackClicked = { viewModel.goBackInTab(currentTab!!.id) },
-                    onNewFolderClicked = { showCreateFolderDialog = true },
-                    searchQuery = searchQuery,
-                    onSearchQueryChanged = { searchQuery = it }
-                )
-
-                // Filter files inside folder based on searches
-                val filteredFiles = currentFiles.filter {
-                    it.name.contains(searchQuery, ignoreCase = true)
-                }
-
-                // 3. MAIN FILE LISTVIEW
-                if (filteredFiles.isNotEmpty()) {
-                    val activeAcc = accounts.find { it.id == currentTab!!.accountId }
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentPadding = PaddingValues(bottom = 96.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(filteredFiles) { file ->
-                            FileRowItem(
-                                file = file,
-                                onClick = {
-                                    if (file.isFolder) {
-                                        viewModel.enterFolder(currentTab!!.id, file.path)
+                        IconButton(
+                            onClick = {
+                                if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                    if (realLocalPath != context.filesDir.absolutePath) {
+                                        realLocalPath = java.io.File(realLocalPath).parent ?: context.filesDir.absolutePath
                                     }
-                                },
-                                onCopy = { viewModel.copyToClipboard(file, currentTab!!.accountId) },
-                                onCut = { viewModel.cutToClipboard(file, currentTab!!.accountId) },
-                                onDelete = { viewModel.deleteFile(file.name) },
-                                onRename = {
-                                    selectedRenameFile = file
-                                    showRenameDialog = true
+                                } else {
+                                    viewModel.goBackInTab(currentTab!!.id)
+                                }
+                            },
+                            enabled = if (isRealLocalFSEnabled && currentTab?.accountId == 1) realLocalPath != context.filesDir.absolutePath else currentTab!!.historyIndex > 0,
+                            modifier = Modifier.size(32.dp).testTag("explorer_back")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ChevronLeft,
+                                contentDescription = "Go back",
+                                tint = if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                    if (realLocalPath != context.filesDir.absolutePath) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                                } else {
+                                    if (currentTab!!.historyIndex > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
                                 }
                             )
                         }
+
+                        // Path Breadcrumbs text representation
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                    realLocalPath.removePrefix(context.filesDir.parent ?: "")
+                                } else {
+                                    currentTab!!.currentPath
+                                },
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.Medium,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        if (isMultiSelectActive) {
+                            IconButton(
+                                onClick = {
+                                    isMultiSelectActive = false
+                                    selectedFiles = emptySet()
+                                },
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(8.dp))
+                                    .size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Cancel,
+                                    contentDescription = "Cancel Multi-Select",
+                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        } else {
+                            IconButton(
+                                onClick = { showCreateFolderDialog = true },
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp))
+                                    .size(34.dp)
+                                    .testTag("create_folder_fab")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CreateNewFolder,
+                                    contentDescription = "Create Folder",
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // SEARCH & INTERACTIVE TOGGLES
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = {
+                                searchQuery = it
+                                if (isGlobalSearchEnabled) {
+                                    viewModel.updateSearchQuery(it)
+                                }
+                            },
+                            placeholder = { 
+                                Text(
+                                    if (isGlobalSearchEnabled) "Search globally across all clouds..." 
+                                    else if (isRealLocalFSEnabled && currentTab?.accountId == 1) "Search real local files..."
+                                    else "Filter current directory...", 
+                                    fontSize = 12.sp
+                                ) 
+                            },
+                            singleLine = true,
+                            leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(18.dp)) },
+                            trailingIcon = {
+                                FilterChip(
+                                    selected = isGlobalSearchEnabled,
+                                    onClick = { 
+                                        isGlobalSearchEnabled = !isGlobalSearchEnabled
+                                        if (isGlobalSearchEnabled) {
+                                            viewModel.updateSearchQuery(searchQuery)
+                                        }
+                                    },
+                                    label = { Text("Global", fontSize = 10.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                    ),
+                                    modifier = Modifier.height(28.dp).padding(end = 4.dp).testTag("global_search_chip")
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("explorer_search"),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent
+                            )
+                        )
+                    }
+
+                    // Local FS Mode Selector (only show in Local Tab)
+                    if (currentTab?.accountId == 1) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Local Mode:",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            FilterChip(
+                                selected = !isRealLocalFSEnabled,
+                                onClick = { 
+                                    isRealLocalFSEnabled = false 
+                                    isMultiSelectActive = false
+                                    selectedFiles = emptySet()
+                                    fsChangeCounter++
+                                },
+                                label = { Text("Virtual Cloud Seeding", fontSize = 11.sp) }
+                            )
+                            FilterChip(
+                                selected = isRealLocalFSEnabled,
+                                onClick = { 
+                                    isRealLocalFSEnabled = true 
+                                    isMultiSelectActive = false
+                                    selectedFiles = emptySet()
+                                    fsChangeCounter++
+                                },
+                                label = { Text("Android System Files", fontSize = 11.sp) }
+                            )
+                        }
+                    }
+                }
+
+                // 3. MAIN CONTAINER (GLOBAL SEARCH RESULTS OR CURRENT DIRECTORY LIST)
+                if (isGlobalSearchEnabled) {
+                    val groupedResults = remember(globalSearchResults) {
+                        globalSearchResults.groupBy { it.first }
+                    }
+
+                    if (groupedResults.isNotEmpty()) {
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentPadding = PaddingValues(bottom = 96.dp)
+                        ) {
+                            groupedResults.forEach { (accId, resultsList) ->
+                                val accName = accounts.find { it.id == accId }?.name ?: "Local Storage"
+                                item {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (accId == 1) Icons.Default.FolderOpen else Icons.Default.CloudQueue,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = accName,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                    }
+                                }
+
+                                items(resultsList) { (_, file) ->
+                                    FileRowItem(
+                                        file = file,
+                                        onClick = {
+                                            // Quick navigate to folder or copy
+                                            if (file.isFolder) {
+                                                val matchingTab = tabs.find { it.accountId == accId }
+                                                if (matchingTab != null) {
+                                                    viewModel.selectTab(matchingTab.id)
+                                                    viewModel.enterFolder(matchingTab.id, file.path)
+                                                } else {
+                                                    viewModel.createNewTab(accId, accName)
+                                                }
+                                                isGlobalSearchEnabled = false
+                                            } else {
+                                                viewModel.copyToClipboard(file, accId)
+                                            }
+                                        },
+                                        onCopy = { viewModel.copyToClipboard(file, accId) },
+                                        onCut = { viewModel.cutToClipboard(file, accId) },
+                                        onDelete = { 
+                                            viewModel.deleteFile(file.name)
+                                            fsChangeCounter++
+                                        },
+                                        onRename = {
+                                            selectedRenameFile = file
+                                            showRenameDialog = true
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            EmptyFolderState(isSearchActive = true)
+                        }
                     }
                 } else {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        EmptyFolderState(isSearchActive = searchQuery.isNotEmpty())
+                    // MAIN DIRECTORY LIST
+                    if (filesToDisplay.isNotEmpty()) {
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentPadding = PaddingValues(bottom = 96.dp)
+                        ) {
+                            items(filesToDisplay) { file ->
+                                val isSelected = selectedFiles.contains(file)
+                                FileRowItem(
+                                    file = file,
+                                    isMultiSelectActive = isMultiSelectActive,
+                                    isSelected = isSelected,
+                                    onSelectedChange = { selected ->
+                                        isMultiSelectActive = true
+                                        val updated = selectedFiles.toMutableSet()
+                                        if (selected) updated.add(file) else updated.remove(file)
+                                        selectedFiles = updated
+                                        if (selectedFiles.isEmpty()) {
+                                            isMultiSelectActive = false
+                                        }
+                                    },
+                                    onClick = {
+                                        if (file.isFolder) {
+                                            if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                                realLocalPath = file.path
+                                            } else {
+                                                viewModel.enterFolder(currentTab!!.id, file.path)
+                                            }
+                                        }
+                                    },
+                                    onCopy = { viewModel.copyToClipboard(file, currentTab!!.accountId) },
+                                    onCut = { viewModel.cutToClipboard(file, currentTab!!.accountId) },
+                                    onDelete = {
+                                        if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                            java.io.File(file.path).delete()
+                                            fsChangeCounter++
+                                        } else {
+                                            viewModel.deleteFile(file.name)
+                                        }
+                                    },
+                                    onRename = {
+                                        selectedRenameFile = file
+                                        showRenameDialog = true
+                                    }
+                                )
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            EmptyFolderState(isSearchActive = searchQuery.isNotEmpty())
+                        }
+                    }
+                }
+            }
+        }
+
+        // FLOATING MULTI-SELECT COMMAND BAR
+        if (isMultiSelectActive && selectedFiles.isNotEmpty()) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 80.dp, start = 16.dp, end = 16.dp)
+                    .fillMaxWidth()
+                    .testTag("multi_select_bar"),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shadowElevation = 8.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Selected: ${selectedFiles.size} items",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        IconButton(
+                            onClick = {
+                                val firstFile = selectedFiles.first()
+                                viewModel.copyToClipboard(firstFile, currentTab!!.accountId)
+                                isMultiSelectActive = false
+                                selectedFiles = emptySet()
+                            }
+                        ) {
+                            Icon(Icons.Default.ContentCopy, "Bulk Copy", tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+
+                        IconButton(
+                            onClick = {
+                                if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                    selectedFiles.forEach { file ->
+                                        java.io.File(file.path).delete()
+                                    }
+                                    fsChangeCounter++
+                                } else {
+                                    val names = selectedFiles.map { it.name }
+                                    viewModel.deleteFilesBulk(names)
+                                }
+                                isMultiSelectActive = false
+                                selectedFiles = emptySet()
+                            }
+                        ) {
+                            Icon(Icons.Default.Delete, "Bulk Delete", tint = MaterialTheme.colorScheme.error)
+                        }
+
+                        IconButton(
+                            onClick = {
+                                isMultiSelectActive = false
+                                selectedFiles = emptySet()
+                            }
+                        ) {
+                            Icon(Icons.Default.Close, "Clear Selection", tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
                     }
                 }
             }
@@ -165,7 +545,12 @@ fun ExplorerScreen(viewModel: RiaViewModel) {
                 Button(
                     onClick = {
                         if (folderName.isNotBlank()) {
-                            viewModel.createNewFolder(folderName)
+                            if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                java.io.File(realLocalPath, folderName).mkdir()
+                                fsChangeCounter++
+                            } else {
+                                viewModel.createNewFolder(folderName)
+                            }
                             showCreateFolderDialog = false
                         }
                     },
@@ -196,7 +581,12 @@ fun ExplorerScreen(viewModel: RiaViewModel) {
                 Button(
                     onClick = {
                         if (newName.isNotBlank() && newName != selectedRenameFile!!.name) {
-                            viewModel.renameFile(selectedRenameFile!!.name, newName)
+                            if (isRealLocalFSEnabled && currentTab?.accountId == 1) {
+                                java.io.File(selectedRenameFile!!.path).renameTo(java.io.File(realLocalPath, newName))
+                                fsChangeCounter++
+                            } else {
+                                viewModel.renameFile(selectedRenameFile!!.name, newName)
+                            }
                             showRenameDialog = false
                         }
                     },
@@ -477,6 +867,9 @@ fun ExplorerNavigationHeader(
 @Composable
 fun FileRowItem(
     file: VFile,
+    isMultiSelectActive: Boolean = false,
+    isSelected: Boolean = false,
+    onSelectedChange: (Boolean) -> Unit = {},
     onClick: () -> Unit,
     onCopy: () -> Unit,
     onCut: () -> Unit,
@@ -489,13 +882,34 @@ fun FileRowItem(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
-                onClick = onClick,
-                onLongClick = { expandedMenu = true }
+                onClick = {
+                    if (isMultiSelectActive) {
+                        onSelectedChange(!isSelected)
+                    } else {
+                        onClick()
+                    }
+                },
+                onLongClick = {
+                    if (!isMultiSelectActive) {
+                        onSelectedChange(true)
+                    } else {
+                        expandedMenu = true
+                    }
+                }
             )
+            .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        if (isMultiSelectActive) {
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = onSelectedChange,
+                modifier = Modifier.testTag("file_checkbox_${file.name}")
+            )
+        }
+
         val fileIcon = when {
             file.isFolder -> Icons.Default.Folder
             file.isEncrypted -> Icons.Default.Lock
@@ -718,4 +1132,42 @@ fun getAccountIcon(type: String): ImageVector {
         "Dropbox" -> Icons.Default.FolderShared
         else -> Icons.Default.Cloud
     }
+}
+
+// Android File System API - Reads actual files and directories in standard context.filesDir sandbox
+fun getRealLocalFilesList(currentPath: String, context: android.content.Context): List<VFile> {
+    val dir = java.io.File(currentPath)
+    if (!dir.exists() || !dir.isDirectory) {
+        return emptyList()
+    }
+    // Seed some directories under filesDir if we are there to give a beautiful starting point
+    if (currentPath == context.filesDir.absolutePath) {
+        val docs = java.io.File(dir, "Documents")
+        if (!docs.exists()) docs.mkdir()
+        val dls = java.io.File(dir, "Downloads")
+        if (!dls.exists()) dls.mkdir()
+        val backups = java.io.File(dir, "Backups")
+        if (!backups.exists()) backups.mkdir()
+        
+        val doc1 = java.io.File(docs, "cloud_vault_seed_ledger.enc")
+        if (!doc1.exists()) doc1.writeText("RSA PRIVATE KEY - SYSTEM ACCESS")
+        val doc2 = java.io.File(docs, "audit_checklist.txt")
+        if (!doc2.exists()) doc2.writeText("All secure connections verified successfully on local storage.")
+    }
+
+    val results = mutableListOf<VFile>()
+    dir.listFiles()?.forEach { file ->
+        results.add(
+            VFile(
+                name = file.name,
+                path = file.absolutePath,
+                size = file.length(),
+                isFolder = file.isDirectory,
+                isEncrypted = file.name.endsWith(".enc") || file.name.endsWith(".pem"),
+                lastModified = file.lastModified()
+            )
+        )
+    }
+    // Sort directories first, then files
+    return results.sortedWith(compareBy({ !it.isFolder }, { it.name }))
 }

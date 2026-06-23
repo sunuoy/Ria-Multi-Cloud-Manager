@@ -45,6 +45,26 @@ class RiaViewModel(application: Application) : AndroidViewModel(application) {
 
     val clipboard = repository.clipboard
 
+    // Global file search states
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    val searchResults: StateFlow<List<Pair<Int, VFile>>> = _searchQuery
+        .map { query -> repository.searchFiles(query) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    // Bulk action helper for multi-selection
+    fun deleteFilesBulk(fileNames: List<String>) {
+        val active = currentTab.value ?: return
+        fileNames.forEach { name ->
+            repository.deleteFile(active.accountId, active.currentPath, name)
+        }
+    }
+
     // Current files being viewed in the active tab
     val currentTabFiles: StateFlow<List<VFile>> = combine(tabs, selectedTabId) { tabList, activeId ->
         val activeTab = tabList.find { it.id == activeId }
